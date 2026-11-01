@@ -1,0 +1,12 @@
+{
+  "name": "lumen-vocal-studio",
+  "version": "0.1.0",
+  "description": "An original neo-soul singing voice synthesizer that runs in the browser: write, play, hum or import a melody and hear it sung.",
+  "private": true,
+  "scripts": {
+    "start": "python3 -m http.server 8000",
+    "test": "node test/roundtrip.js && node test/midi.js && node test/smoke.js",
+    "build:artifact": "node tools/build-artifact.js"
+  },
+  "license": "MIT"
+}

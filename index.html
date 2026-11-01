@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lumen Vocal Studio</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <h1><span class="wordmark">Lumen</span></h1>
+      <p class="tagline">An original neo-soul voice. Write, play or hum a melody and she sings it back.</p>
+    </div>
+    <div class="transport" role="group" aria-label="Playback">
+      <button id="playBtn" class="btn primary play" type="button" aria-label="Sing it">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 4l10 6-10 6z" fill="currentColor"/></svg>
+        <span>Sing it</span>
+      </button>
+      <button id="stopBtn" class="btn" type="button">Stop</button>
+      <button id="exportBtn" class="btn" type="button">Export WAV</button>
+      <span id="status" class="status" role="status" aria-live="polite">Ready</span>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="panel melody" aria-labelledby="melodyH">
+      <div class="panel-head">
+        <h2 id="melodyH">Melody</h2>
+        <div class="toolbar">
+          <label class="field inline"><span>Example</span>
+            <select id="exampleSel"></select>
+          </label>
+          <label class="field inline"><span>Tempo</span>
+            <input id="bpm" type="number" min="40" max="200" step="1" value="80"><em>bpm</em>
+          </label>
+          <label class="field inline"><span>Grid</span>
+            <select id="gridSel">
+              <option value="1">1/4</option>
+              <option value="0.5">1/8</option>
+              <option value="0.25" selected>1/16</option>
+              <option value="0.3333333">1/8 trip</option>
+            </select>
+          </label>
+          <label class="field inline"><span>New note</span>
+            <select id="lenSel">
+              <option value="0.25">1/16</option>
+              <option value="0.5">1/8</option>
+              <option value="1" selected>1/4</option>
+              <option value="2">1/2</option>
+              <option value="4">1 bar</option>
+            </select>
+          </label>
+          <button id="undoBtn" class="btn small" type="button" title="Undo (Ctrl/⌘+Z)">Undo</button>
+          <button id="clearBtn" class="btn small" type="button">Clear</button>
+        </div>
+      </div>
+
+      <div id="rollWrap" class="roll-wrap">
+        <canvas id="roll" aria-label="Piano roll. Click to add notes, drag to move, drag the right edge to resize, right-click to delete."></canvas>
+      </div>
+      <p class="hint">Click to add a note. Drag to move it, drag its right edge to resize, right-click to delete, double-click to change the lyric. Green marks show the runs and grace notes she adds.</p>
+
+      <div id="inspector" class="inspector" hidden>
+        <span class="insp-title">Selected note</span>
+        <label class="field inline"><span>Pitch</span><input id="inPitch" type="text" size="5"></label>
+        <label class="field inline"><span>Start</span><input id="inStart" type="number" step="0.25" min="0"></label>
+        <label class="field inline"><span>Beats</span><input id="inLen" type="number" step="0.25" min="0.0625"></label>
+        <label class="field inline grow"><span>Lyric</span><input id="inLyric" type="text" placeholder="ooh  ·  _ holds the vowel"></label>
+        <button id="inDelete" class="btn small ghost" type="button">Delete</button>
+      </div>
+
+      <div class="two">
+        <div class="sub">
+          <h3><label for="notation">Notation</label></h3>
+          <textarea id="notation" spellcheck="false" rows="5"></textarea>
+          <p class="hint mono">NOTE:BEATS/lyric  ·  R:1 is a rest  ·  _ continues the syllable  ·  [HH AY] spells sounds</p>
+          <p id="notationErr" class="error" hidden></p>
+        </div>
+        <div class="sub">
+          <h3><label for="lyrics">Lyrics</label></h3>
+          <textarea id="lyrics" rows="3" placeholder="hold me in the blue _ light"></textarea>
+          <div class="row">
+            <button id="fitLyricsBtn" class="btn small" type="button">Fit lyrics to notes</button>
+            <label class="field inline"><span>Empty notes sing</span>
+              <select id="defSyl">
+                <option value="ooh">ooh</option>
+                <option value="ah">ah</option>
+                <option value="mm">mm</option>
+                <option value="la">la</option>
+                <option value="da">da</option>
+              </select>
+            </label>
+          </div>
+          <p class="hint">Syllables go onto the notes in order. Use <code>_</code> to stretch a syllable over the next note, and hyphens to split words yourself (<code>drift-ing</code>).</p>
+        </div>
+      </div>
+    </section>
+
+    <aside class="side">
+      <section class="panel" aria-labelledby="charH">
+        <div class="panel-head"><h2 id="charH">Character</h2><button id="resetChar" class="btn small ghost" type="button">Reset</button></div>
+        <div class="macro">
+          <div class="macro-label"><label for="mAiry">Airy</label><output id="mAiryOut" for="mAiry"></output></div>
+          <input id="mAiry" type="range" min="0" max="100" value="62">
+          <p class="macro-desc">Breath, soft attacks, stacked doubles, long reverb.</p>
+        </div>
+        <div class="macro">
+          <div class="macro-label"><label for="mAgile">Agile</label><output id="mAgileOut" for="mAgile"></output></div>
+          <input id="mAgile" type="range" min="0" max="100" value="58">
+          <p class="macro-desc">Jazz-inflected runs, flips, scoops and a livelier vibrato.</p>
+        </div>
+        <div class="macro">
+          <div class="macro-label"><label for="mCool">Cool</label><output id="mCoolOut" for="mCool"></output></div>
+          <input id="mCool" type="range" min="0" max="100" value="55">
+          <p class="macro-desc">Restraint: straight tone, late vibrato, laid-back timing, sighing falls.</p>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="layH">
+        <div class="panel-head"><h2 id="layH">Layers</h2></div>
+        <div class="stack">
+          <label class="field"><span>Harmony</span>
+            <select id="harmony">
+              <option value="none">Lead only</option>
+              <option value="thirds">Third above</option>
+              <option value="stack">Triad stack (3rd + 5th)</option>
+              <option value="below">Sixth below</option>
+              <option value="lush">Third above + sixth below</option>
+              <option value="octave">Octave below</option>
+            </select>
+          </label>
+          <label class="field"><span>Key</span>
+            <select id="keySel"></select>
+          </label>
+          <label class="field"><span>Doubles</span>
+            <select id="doubles">
+              <option value="auto">Auto (from Airy)</option>
+              <option value="0">None</option>
+              <option value="2">Left + right</option>
+            </select>
+          </label>
+          <label class="field"><span>Transpose (semitones)</span>
+            <input id="transpose" type="number" min="-24" max="24" step="1" value="0">
+          </label>
+        </div>
+        <p id="keyInfo" class="hint"></p>
+      </section>
+
+      <section class="panel" aria-labelledby="inH">
+        <div class="panel-head"><h2 id="inH">Bring a melody</h2></div>
+        <div class="input-block">
+          <h3>Play it</h3>
+          <p class="hint">Computer keys <kbd>A</kbd>–<kbd>K</kbd> play white notes, <kbd>W</kbd> <kbd>E</kbd> <kbd>T</kbd> <kbd>Y</kbd> <kbd>U</kbd> the black ones. <kbd>Z</kbd>/<kbd>X</kbd> shift the octave. A MIDI keyboard works too.</p>
+          <div class="row">
+            <button id="recBtn" class="btn rec" type="button"><span class="dot" aria-hidden="true"></span><span>Record</span></button>
+            <button id="midiBtn" class="btn small" type="button">Connect MIDI</button>
+            <span id="octInfo" class="pill mono">C4</span>
+          </div>
+        </div>
+        <div class="input-block">
+          <h3>Hum it</h3>
+          <p class="hint">Hum or sing on "doo" so notes separate cleanly. Any voice range works; it is moved into hers.</p>
+          <div class="row">
+            <button id="humBtn" class="btn" type="button">Hum into mic</button>
+            <label class="btn small file">Upload recording<input id="humFile" type="file" accept="audio/*"></label>
+          </div>
+          <div class="row checks">
+            <label><input id="humSnap" type="checkbox" checked> Snap to key</label>
+            <label><input id="humFit" type="checkbox" checked> Fit to her range</label>
+          </div>
+        </div>
+        <div class="input-block">
+          <h3>Import it</h3>
+          <div class="row">
+            <label class="btn small file">Open MIDI file<input id="midiFile" type="file" accept=".mid,.midi,audio/midi"></label>
+          </div>
+          <p class="hint">Uses the top line of the busiest track and any lyric events in the file.</p>
+        </div>
+      </section>
+
+      <details class="panel advanced">
+        <summary><h2>Fine tuning</h2></summary>
+        <div id="advanced" class="adv-grid"></div>
+      </details>
+    </aside>
+  </main>
+
+  <footer class="foot">
+    <p>Lumen is a synthetic voice built from scratch (glottal source, formant vocal tract, phrasing rules). It does not imitate or clone any real singer. Everything runs in your browser.</p>
+  </footer>
+</div>
+
+<script src="js/engine.js"></script>
+<script src="js/lyrics.js"></script>
+<script src="js/score.js"></script>
+<script src="js/arrange.js"></script>
+<script src="js/input.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/pianoroll.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
