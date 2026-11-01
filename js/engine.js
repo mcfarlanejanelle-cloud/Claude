@@ -106,6 +106,70 @@
     return segs;
   }
 
+
+  // ---------------------------------------------------------------- glottal source
+  // Liljencrants-Fant (LF) glottal flow derivative, parameterised by Rd
+  // (Fant 1995). Low Rd = pressed/tense, ~1 = modal, high Rd = breathy/soft.
+  // One period of each Rd is pre-computed as a wavetable, plus its flow
+  // (for noise modulation) and harmonic powers (for loudness compensation).
+  const LF_N = 2048, RD_MIN = 0.3, RD_MAX = 2.7, RD_STEP = 0.1;
+  let LF_TABLES = null;
+
+  function buildLF(Rd) {
+    const Ra = (-1 + 4.8 * Rd) / 100, Rk = (22.4 + 11.8 * Rd) / 100;
+    const Rg = (Rk * (0.5 + 1.2 * Rk)) / (0.44 * Rd - 4 * Ra * (0.5 + 1.2 * Rk));
+    const tp = 1 / (2 * Rg);
+    const te = Math.min(0.97, tp * (1 + Rk));
+    const ta = Math.max(0.002, Ra);
+    const wg = Math.PI / tp;
+    let eps = 1 / ta;
+    for (let i = 0; i < 60; i++) eps = (1 - Math.exp(-eps * (1 - te))) / ta;
+    // return-phase area (Ee = 1)
+    const R = -(1 / (eps * ta)) * ((1 - Math.exp(-eps * (1 - te))) / eps - (1 - te) * Math.exp(-eps * (1 - te)));
+    const open = (a) => {
+      const E0 = -1 / (Math.exp(a * te) * Math.sin(wg * te));
+      const I = (Math.exp(a * te) * (a * Math.sin(wg * te) - wg * Math.cos(wg * te)) + wg) / (a * a + wg * wg);
+      return E0 * I;
+    };
+    // solve open(a) + R = 0 for the growth factor a
+    let lo = -20, hi = 80;
+    const f = (a) => open(a) + R;
+    for (let k = 0; k < 40 && f(lo) * f(hi) > 0; k++) { lo -= 20; hi += 40; }
+    for (let k = 0; k < 80; k++) { const m = (lo + hi) / 2; if (f(lo) * f(m) <= 0) hi = m; else lo = m; }
+    const a = (lo + hi) / 2;
+    const E0 = -1 / (Math.exp(a * te) * Math.sin(wg * te));
+    const d = new Float32Array(LF_N + 1);
+    for (let i = 0; i < LF_N; i++) {
+      const t = i / LF_N;
+      d[i] = t < te ? E0 * Math.exp(a * t) * Math.sin(wg * t)
+        : -(1 / (eps * ta)) * (Math.exp(-eps * (t - te)) - Math.exp(-eps * (1 - te)));
+    }
+    // remove any residual DC so the flow returns to zero
+    let mean = 0; for (let i = 0; i < LF_N; i++) mean += d[i]; mean /= LF_N;
+    for (let i = 0; i < LF_N; i++) d[i] -= mean;
+    d[LF_N] = d[0];
+    const flow = new Float32Array(LF_N + 1);
+    let acc = 0, fmax = 1e-9, fmin = 0;
+    for (let i = 0; i < LF_N; i++) { acc += d[i]; flow[i] = acc; fmax = Math.max(fmax, acc); fmin = Math.min(fmin, acc); }
+    for (let i = 0; i < LF_N; i++) flow[i] = (flow[i] - fmin) / (fmax - fmin);
+    flow[LF_N] = flow[0];
+    const harm = new Float64Array(41);
+    for (let h = 1; h <= 40; h++) {
+      let re = 0, im = 0;
+      for (let i = 0; i < LF_N; i++) { const w = 2 * Math.PI * h * i / LF_N; re += d[i] * Math.cos(w); im -= d[i] * Math.sin(w); }
+      harm[h] = (re * re + im * im) / (LF_N * LF_N);
+    }
+    return { d, flow, harm };
+  }
+
+  function lfTables() {
+    if (!LF_TABLES) {
+      LF_TABLES = [];
+      for (let rd = RD_MIN; rd <= RD_MAX + 1e-9; rd += RD_STEP) LF_TABLES.push(buildLF(rd));
+    }
+    return LF_TABLES;
+  }
+
   const DEFAULTS = {
     sampleRate: 48000,
     breathiness: 0.45,   // 0..1   aspiration + softer glottal pulse
@@ -118,8 +182,10 @@
     release: 0.09,       // s
     formantShift: 1.06,  // >1 = smaller / lighter tract
     drift: 6,            // cents of slow pitch wander
-    jitter: 0.004,       // cycle-to-cycle pitch noise
-    shimmer: 0.05,       // cycle-to-cycle amplitude noise
+    jitter: 0.006,       // cycle-to-cycle pitch noise
+    shimmer: 0.04,       // cycle-to-cycle amplitude noise
+    breaths: 0.5,        // 0..1  loudness of breath intakes between phrases
+    humanize: 1,         // 0..1  micro-variation (formants, vibrato, flutter, onsets)
     detune: 0,           // cents (for doubles)
     seed: 1,
     tail: 1.0            // s of silence rendered after the last note
@@ -153,8 +219,18 @@
     const frT = new Float32Array(nF);
     const ffT = new Float32Array(nF).fill(5000);
     const fqT = new Float32Array(nF).fill(1);
+    const inhT = new Float32Array(nF);   // breath intake envelope
+    const fryT = new Float32Array(nF);   // creaky phrase endings
     const FT = [], BT = [];
     for (let k = 0; k < 5; k++) { FT.push(new Float32Array(nF).fill(NaN)); BT.push(new Float32Array(nF).fill(NaN)); }
+    const hum = clamp(p.humanize, 0, 1);
+    const breath = p.breathiness;
+    // no two vowels are sung identically: small per-note formant variation
+    const vary = (v) => ({
+      f: v.f.map((x, k) => (k < 3 ? x * (1 + hum * (rand() - 0.5) * (k === 0 ? 0.06 : 0.04)) : x)),
+      b: v.b.map((x) => x * (1 + hum * (rand() - 0.5) * 0.2)),
+      g: v.g
+    });
 
     const fr = (t) => Math.max(0, Math.min(nF - 1, Math.round(t * fps)));
 
@@ -179,7 +255,7 @@
       const cs = clamp(dur / 0.35, 0.55, 1);
       const vel = n.vel === undefined ? 0.8 : n.vel;
       const nuc = nucleusList(n.nucleus);
-      const v1 = VOWELS[nuc[0]], v2 = VOWELS[nuc[nuc.length - 1]];
+      const v1 = vary(VOWELS[nuc[0]]), v2 = nuc.length > 1 ? vary(VOWELS[nuc[nuc.length - 1]]) : v1;
       const on = expandCons(n.onset, cs);
       let co = expandCons(n.coda, cs);
       const onDur = on.reduce((s, x) => s + x.d, 0);
@@ -213,6 +289,33 @@
       // coda consonants
       t = vB;
       for (const s of co) { paintSpec(s, t, t + s.d, v2.f, v2.b); t += s.d; }
+
+      // breathy onset: a little air escapes before the folds close ("h"-like)
+      if (!n.legatoPrev && !on.length && rand() < (0.2 + 0.7 * breath) * hum) {
+        const hd = 0.035 + 0.04 * breath;
+        paintSpec({ v: 0, asp: 1.1, F: v1.f, B: v1.b }, onStart - hd, onStart);
+        for (let i = fr(onStart - hd); i < a0; i++) ampT[i] = Math.max(ampT[i], vel * 0.55);
+      }
+      // breathy release: voicing stops a moment before the air does
+      if (!n.legatoNext && !co.length && dur > 0.25 && rand() < (0.15 + 0.7 * breath) * hum) {
+        const rd = 0.05 + 0.07 * breath;
+        paintSpec({ v: 0.15, asp: 1.2, F: v2.f, B: v2.b }, n.t1 - 0.025, n.t1 + rd);
+        for (let i = fr(n.t1); i < fr(n.t1 + rd); i++) { ampT[i] = Math.max(ampT[i], vel * 0.45); if (isNaN(tMidi[i])) tMidi[i] = n.midi; }
+      }
+      // breath intake before a phrase
+      if (n.inhale) {
+        const e = onStart - 0.05, b0 = e - n.inhale;
+        for (let i = fr(b0); i < fr(e); i++) {
+          const x = (i / fps - b0) / n.inhale;
+          inhT[i] = Math.max(inhT[i], Math.pow(Math.sin(Math.PI * Math.min(1, x * 1.1)), 1.3) * (n.inhaleLevel || 1));
+        }
+      }
+      // creaky (fry) phrase ending
+      if (n.fry) {
+        const fd = Math.min(0.24, dur * 0.5);
+        const s0 = fr(n.t1 - fd), s1 = fr(n.t1 + 0.05);
+        for (let i = s0; i < s1; i++) fryT[i] = n.fry * clamp((i - s0) / Math.max(1, fr(n.t1) - s0), 0, 1);
+      }
 
       // scoop into the note (pitch starts below and rises)
       if (n.scoop) {
@@ -256,23 +359,32 @@
 
     // ---- smooth control tracks -> per-frame values
     const kOf = (tau) => 1 - Math.exp(-1 / (fps * Math.max(tau, 1e-4)));
-    const kPort = kOf(p.portamento), kAtt = kOf(p.attack), kRel = kOf(p.release);
-    const kArt = kOf(0.006), kSrc = kOf(0.008), kFor = kOf(0.022), kVib = kOf(0.12);
+    const kAtt = kOf(p.attack), kRel = kOf(p.release);
+    const kArt = kOf(0.006), kSrc = kOf(0.008), kFor = kOf(0.022), kVib = kOf(0.12), kFry = kOf(0.04);
+    const kFl = kOf(0.035);
+    // legato pitch moves like a damped spring: a small, natural overshoot
+    const wP = 1.7 / Math.max(p.portamento, 0.012), zeta = 0.5 + 0.25 * (1 - hum), dtF = 1 / fps;
 
     const f0 = new Float32Array(nF + 1);
     const amp = new Float32Array(nF + 1);
     const ampF = new Float32Array(nF);
     const voi = new Float32Array(nF), asp = new Float32Array(nF), fri = new Float32Array(nF);
     const ffr = new Float32Array(nF), fqq = new Float32Array(nF);
+    const rdA = new Float32Array(nF), fry = new Float32Array(nF), inh = new Float32Array(nF);
     const Fs = [], Bs = [];
     for (let k = 0; k < 5; k++) { Fs.push(new Float32Array(nF)); Bs.push(new Float32Array(nF)); }
 
-    let sM = tMidi[0], sA = 0, sAF = 0, sArt = 1, sV = 1, sAs = 0, sFr = 0, sFf = 5000, sFq = 1, sVib = 0;
+    let sM = tMidi[0], vM = 0, sA = 0, sAF = 0, sArt = 1, sV = 1, sAs = 0, sFr = 0, sFf = 5000, sFq = 1, sVib = 0, sFry = 0;
     const sF = FT.map((a) => a[0]), sB = BT.map((a) => a[0]);
-    let vph = rand() * Math.PI * 2, drift = 0, driftV = 0, rateWob = 0;
-    const breath = p.breathiness;
+    let vph = rand() * Math.PI * 2, drift = 0, driftV = 0, flut = 0;
+    const ph = [0, 0, 0, 0, 0].map(() => rand() * Math.PI * 2);
+    const rdBase = 0.6 + 1.2 * breath;     // modal .. breathy
     for (let i = 0; i < nF; i++) {
-      if (reset[i]) sM = tMidi[i]; else sM += (tMidi[i] - sM) * kPort;
+      const tt = i / fps;
+      if (reset[i]) { sM = tMidi[i]; vM = 0; } else {
+        const acc = wP * wP * (tMidi[i] - sM) - 2 * zeta * wP * vM;
+        vM += acc * dtF; sM += vM * dtF;
+      }
       const at = ampT[i];
       sA += (at - sA) * (at > sA ? kAtt : kRel);
       sAF += (at - sAF) * kArt;
@@ -283,24 +395,39 @@
       sFf += (ffT[i] - sFf) * kSrc;
       sFq += (fqT[i] - sFq) * kSrc;
       sVib += (vibT[i] - sVib) * kVib;
-      // slow random drift (cents) and vibrato-rate wobble
+      sFry += (fryT[i] - sFry) * kFry;
+      // slow drift, fast flutter, and a vibrato that is never quite regular
       driftV += (rand() - 0.5) * 0.02; driftV *= 0.995;
       drift += driftV; drift *= 0.999;
-      rateWob += ((rand() - 0.5) * 0.4 - rateWob) * 0.002;
-      vph += (2 * Math.PI * p.vibRate * (1 + rateWob)) / fps;
-      const cents = sVib * Math.sin(vph) + clamp(drift, -1, 1) * p.drift + p.detune;
-      const midi = sM + pOff[i] + cents / 100;
+      flut += ((rand() - 0.5) * 2 - flut) * kFl;
+      const rateMul = 1 + hum * 0.05 * Math.sin(2 * Math.PI * 0.43 * tt + ph[0]) + hum * 0.025 * Math.sin(2 * Math.PI * 1.1 * tt + ph[1]);
+      const depthMul = 1 + hum * 0.2 * Math.sin(2 * Math.PI * 0.27 * tt + ph[2]) * Math.sin(2 * Math.PI * 0.61 * tt + ph[3]);
+      vph += (2 * Math.PI * p.vibRate * rateMul) / fps;
+      const vibS = Math.sin(vph) + 0.08 * Math.sin(2 * vph); // slightly asymmetric cycle
+      const cents = sVib * depthMul * vibS + clamp(drift, -1, 1) * p.drift + flut * 55 * hum + p.detune;
+      const midi = sM + pOff[i] + cents / 100 - sFry * 0.8;
       const hz = mtof(midi);
       f0[i] = hz;
-      amp[i] = sA * sArt;
+      // the level breathes with the vibrato (formant/harmonic interaction + tremor)
+      const am = 1 + hum * 0.06 * (sVib / 40) * Math.sin(vph - 0.7);
+      amp[i] = sA * sArt * am;
       ampF[i] = sAF;
       voi[i] = sV; asp[i] = sAs + breath * 0.32 * sV; fri[i] = sFr;
       ffr[i] = sFf; fqq[i] = sFq;
+      fry[i] = sFry; inh[i] = inhT[i];
+      // voice quality: softer = breathier, higher = lighter, fry = pressed
+      const loud = clamp(sA / 0.85, 0, 1.2);
+      const rd = rdBase + 0.75 * (1 - loud) + 0.35 * clamp((midi - 70) / 14, 0, 1) - 0.9 * sFry
+        + hum * 0.08 * Math.sin(2 * Math.PI * 0.37 * tt + ph[4]);
+      rdA[i] = clamp(rd, RD_MIN, RD_MAX);
+      // larynx rises with pitch: formants follow a little; slow formant wander
+      const hShift = 1 + 0.035 * clamp((midi - 67) / 12, -1, 1.5);
       for (let k = 0; k < 5; k++) {
         sF[k] += (FT[k][i] - sF[k]) * kFor;
         sB[k] += (BT[k][i] - sB[k]) * kFor;
-        let F = sF[k] * p.formantShift;
-        let Bw = sB[k] * (1 + breath * (k < 2 ? 0.7 : 0.3));
+        const wander = k < 3 ? 1 + hum * 0.012 * Math.sin(2 * Math.PI * (0.19 + 0.07 * k) * tt + ph[k]) : 1;
+        let F = sF[k] * p.formantShift * hShift * wander;
+        const Bw = sB[k] * (1 + breath * (k < 2 ? 0.7 : 0.3)) * (1 + 0.6 * sFry * (k === 0 ? 1 : 0));
         if (k === 0) F = Math.max(F, hz * 1.08);            // F1 tracks f0 on high notes
         if (k === 1) F = Math.max(F, Fs[0][i] + 220);
         Fs[k][i] = Math.min(F, SRo * 0.45);
@@ -310,27 +437,31 @@
     f0[nF] = f0[nF - 1]; amp[nF] = amp[nF - 1];
 
     // ---- sample loop (oversampled)
+    const LF = lfTables();
+    const nT = LF.length;
     const outLen = Math.ceil(nF * CR / OS);
     const out = new Float32Array(outLen);
-    const oq = 0.55 + 0.3 * breath;                 // open quotient
-    const tp = oq * 0.62, tn = oq * 0.38;
-    const tiltFc = 900 + 7000 * p.brightness * (1 - 0.35 * breath);
-    const tiltK = 1 - Math.exp(-2 * Math.PI * tiltFc / SRo);
+    const VG = 2.9;                                  // voiced source gain
     // presence shelf after the tract (singer's brightness)
-    const hs = highShelf(2400, SRo, 2 + 10 * p.brightness, 0.7);
+    const hs = highShelf(2400, SRo, 1 + 9 * p.brightness, 0.7);
     let hsx1 = 0, hsx2 = 0, hsy1 = 0, hsy2 = 0;
 
     const ry1 = new Float64Array(5), ry2 = new Float64Array(5);
     const rA = new Float64Array(5), rB = new Float64Array(5), rC = new Float64Array(5);
-    let phase = 0, prevFlow = 0, tilt = 0, nPrev = 0, shim = 1, jit = 0;
+    let phase = 0, nPrev = 0, shim = 1, jit = 0, period = 0;
     let fx1 = 0, fx2 = 0, fy1 = 0, fy2 = 0;
     let bx1 = 0, bx2 = 0, by1 = 0, by2 = 0, airLp = 0;
+    let ix1 = 0, ix2 = 0, iy1 = 0, iy2 = 0, inLp = 0;
     const airK = 0.45 * breath * breath + 0.18 * breath;
     const airLpK = 1 - Math.exp(-2 * Math.PI * 7000 / SRo);
-    const [ab0, ab2, aa1, aa2] = (function () {
-      const w = 2 * Math.PI * 3800 / SRo, al = Math.sin(w) / (2 * 0.7), a0 = 1 + al;
+    const inLpK = 1 - Math.exp(-2 * Math.PI * 5000 / SRo);
+    const bp = (fc, Q) => {
+      const w = 2 * Math.PI * fc / SRo, al = Math.sin(w) / (2 * Q), a0 = 1 + al;
       return [al / a0, -al / a0, (-2 * Math.cos(w)) / a0, (1 - al) / a0];
-    })();
+    };
+    const [ab0, ab2, aa1, aa2] = bp(3800, 0.7);
+    const [ib0, ib2, ia1, ia2] = bp(1500, 0.7);    // inhale: open-throat noise
+    const inhK = 0.36 * p.breaths;
     // decimation filter (4th-order Butterworth @ 0.21*SRo) + DC blocker
     const lp = [biquadLP(0.21 * SRo, SRo, 0.5412), biquadLP(0.21 * SRo, SRo, 1.3066)];
     const lps = [[0, 0, 0, 0], [0, 0, 0, 0]];
@@ -345,6 +476,11 @@
         const Bc = 2 * Math.exp(-Math.PI * Bw * T) * Math.cos(2 * Math.PI * F * T);
         rA[k] = 1 - Bc - C; rB[k] = Bc; rC[k] = C;
       }
+      // glottal tables for this frame's voice quality
+      const rf = (rdA[i] - RD_MIN) / RD_STEP;
+      const ti = Math.min(nT - 2, Math.max(0, Math.floor(rf)));
+      const tf = clamp(rf - ti, 0, 1);
+      const TA = LF[ti], TB = LF[ti + 1];
       // Loudness compensation: estimate the tract's gain over the voice's
       // harmonics so that vowels and registers come out at similar levels.
       if ((i & 3) === 0) {
@@ -358,10 +494,9 @@
             const re = 1 - rB[k] * c1 - rC[k] * c2, im = rB[k] * s1 + rC[k] * s2;
             mag2 *= (rA[k] * rA[k]) / (re * re + im * im);
           }
-          const src = 1 / (h * h * (1 + Math.pow(h * hz / tiltFc, 2)));
-          pw += mag2 * src;
+          pw += mag2 * (TA.harm[h] + (TB.harm[h] - TA.harm[h]) * tf);
         }
-        const target = 1 / Math.pow(Math.max(pw, 1e-9), 0.5 * 0.85);
+        const target = 1 / Math.pow(Math.max(pw * 400, 1e-9), 0.5 * 0.85);
         comp = comp === 1 && i === 0 ? target : comp + (target - comp) * 0.25;
       }
       // frication band-pass (RBJ, 0 dB peak)
@@ -371,7 +506,8 @@
       const fb0 = alpha / a0, fb2 = -alpha / a0, fa1 = (-2 * Math.cos(w0)) / a0, fa2 = (1 - alpha) / a0;
 
       const f0a = f0[i], f0b = f0[i + 1], ampA = amp[i], ampB = amp[i + 1];
-      const vv = voi[i], aa = asp[i], ff = fri[i] * ampF[i];
+      const vv = voi[i], aa = asp[i], ff = fri[i] * ampF[i], fy = fry[i], ih = inh[i] * inhK;
+      const jitAmt = p.jitter * (0.5 + 0.5 * hum) + 0.06 * fy, shimAmt = p.shimmer * (0.5 + 0.5 * hum) + 0.35 * fy;
       for (let j = 0; j < CR; j++) {
         const x = j / CR;
         const hz = f0a + (f0b - f0a) * x;
@@ -380,19 +516,18 @@
         phase += inc;
         if (phase >= 1) {
           phase -= 1;
-          shim = 1 + p.shimmer * (rand() - 0.5) * 2;
-          jit = p.jitter * (rand() - 0.5) * 2;
+          period++;
+          // correlated jitter, shimmer; fry alternates strong/weak pulses
+          jit = 0.55 * jit + 0.45 * jitAmt * (rand() - 0.5) * 2;
+          shim = 1 + shimAmt * (rand() - 0.5) * 2;
+          if (fy > 0.05 && (period & 1)) shim *= 1 - 0.55 * fy;
         }
-        // Rosenberg glottal flow + its derivative (excitation)
-        let flow;
-        if (phase < tp) flow = 0.5 * (1 - Math.cos(Math.PI * phase / tp));
-        else if (phase < tp + tn) flow = Math.cos(0.5 * Math.PI * (phase - tp) / tn);
-        else flow = 0;
-        let d = (flow - prevFlow) / Math.max(inc, 1e-6);
-        prevFlow = flow;
-        if (d > 50 || d < -50) d = 0; // phase wrap guard
-        tilt += (d - tilt) * tiltK;
-        const voiced = (tilt * 0.12) * vv * shim;
+        // LF glottal flow derivative (wavetable, interpolated in time and Rd)
+        const px = phase * LF_N, pi = px | 0, pf = px - pi;
+        const dA = TA.d[pi] + (TA.d[pi + 1] - TA.d[pi]) * pf;
+        const dB = TB.d[pi] + (TB.d[pi + 1] - TB.d[pi]) * pf;
+        const flow = TA.flow[pi] + (TB.flow[pi] - TA.flow[pi]) * tf;
+        const voiced = (dA + (dB - dA) * tf) * VG * vv * shim;
         // aspiration: high-passed noise, pulsed by the glottis
         const nz = rand() * 2 - 1;
         const hpn = nz - nPrev; nPrev = nz;
@@ -403,20 +538,28 @@
           const y = rA[k] * s + rB[k] * ry1[k] + rC[k] * ry2[k];
           ry2[k] = ry1[k]; ry1[k] = y; s = y;
         }
-        // lip radiation / presence: gentle +6 dB/oct shelf
+        // presence shelf
         const pe = hs[0] * s + hs[1] * hsx1 + hs[2] * hsx2 - hs[3] * hsy1 - hs[4] * hsy2;
         hsx2 = hsx1; hsx1 = s; hsy2 = hsy1; hsy1 = pe; s = pe;
         // frication (parallel path)
         const fn = rand() * 2 - 1;
-        const fy = fb0 * fn + fb2 * fx2 - fa1 * fy1 - fa2 * fy2;
-        fx2 = fx1; fx1 = fn; fy2 = fy1; fy1 = fy;
-        s += fy * ff * 0.85;
+        const fyy = fb0 * fn + fb2 * fx2 - fa1 * fy1 - fa2 * fy2;
+        fx2 = fx1; fx1 = fn; fy2 = fy1; fy1 = fyy;
+        s += fyy * ff * 0.85;
         // breath ("air") layer: band-limited noise riding the glottal cycle
         const bn = rand() * 2 - 1;
         const by = ab0 * bn + ab2 * bx2 - aa1 * by1 - aa2 * by2;
         bx2 = bx1; bx1 = bn; by2 = by1; by1 = by;
         airLp += (by - airLp) * airLpK;
         s += airLp * airK * vv * g * (0.35 + 0.65 * flow);
+        // breath intake between phrases
+        if (ih > 1e-5) {
+          const inn = rand() * 2 - 1;
+          const iy = ib0 * inn + ib2 * ix2 - ia1 * iy1 - ia2 * iy2;
+          ix2 = ix1; ix1 = inn; iy2 = iy1; iy1 = iy;
+          inLp += (iy + 0.35 * inn - inLp) * inLpK;
+          s += inLp * ih;
+        }
 
         // decimation low-pass
         let z = s;

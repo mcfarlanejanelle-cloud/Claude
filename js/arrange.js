@@ -38,7 +38,10 @@
       doubleLevel: 0.16 + 0.3 * A,
       reverb: 0.12 + 0.45 * A,
       delay: 0.04 + 0.25 * A,
-      air: 1 + 5 * A
+      air: 1 + 5 * A,
+      breaths: 0.25 + 0.55 * A,
+      fryChance: 0.08 + 0.4 * C,
+      humanize: 1
     };
   }
 
@@ -228,14 +231,43 @@
       const off = style.layback * (0.5 + 0.5 * rand()) + 0.008 * (rand() - 0.5);
       for (const n of ph) { n.t0 += off; n.t1 += off; }
     }
-    // make sure nothing starts before zero (consonants lead the beat)
-    const shift = Math.max(0, 0.12 - notes[0].t0);
+    // tiny note-to-note timing variation inside phrases (nobody is a sequencer)
+    const hum = style.humanize == null ? 1 : style.humanize;
+    for (const ph of ph2) {
+      for (let i = 1; i < ph.length; i++) {
+        const n = ph[i], pv = ph[i - 1];
+        if (n.ornament || pv.ornament) continue;
+        const d = (rand() - 0.5) * 0.024 * hum;
+        const t0 = n.t0 + d;
+        if (t0 < pv.t0 + 0.05 || t0 > n.t1 - 0.05) continue;
+        n.t0 = t0;
+        if (pv.legatoNext) pv.t1 = t0;
+      }
+    }
+
+    // breath intakes before phrases, creaky (fry) phrase endings
+    for (let pi = 0; pi < ph2.length; pi++) {
+      const ph = ph2[pi], first = ph[0], last = ph[ph.length - 1];
+      const prevEnd = pi === 0 ? -Infinity : ph2[pi - 1][ph2[pi - 1].length - 1].t1;
+      const gap = first.t0 - prevEnd;
+      const phraseLen = last.t1 - first.t0;
+      if ((style.breaths || 0) > 0 && gap > 0.45) {
+        const want = 0.22 + 0.12 * rand() + Math.min(0.15, phraseLen * 0.03);
+        first.inhale = Math.max(0.15, Math.min(want, gap - 0.25));
+        first.inhaleLevel = (0.6 + 0.4 * rand()) * Math.min(1, 0.5 + phraseLen / 6);
+      }
+      if (last.t1 - last.t0 >= 0.35 && rand() < (style.fryChance || 0)) last.fry = 0.35 + 0.5 * rand();
+    }
+
+    // make sure nothing starts before zero (consonants and breaths lead the beat)
+    const lead = notes[0].inhale ? notes[0].inhale + 0.2 : 0.12;
+    const shift = Math.max(0, lead - notes[0].t0);
     if (shift) for (const n of notes) { n.t0 += shift; n.t1 += shift; }
 
     const voiceBase = {
       breathiness: style.breathiness, brightness: style.brightness, vibRate: style.vibRate, vibDepth: style.vibDepth,
       vibDelay: style.vibDelay, portamento: style.portamento, attack: style.attack, release: style.release,
-      formantShift: style.formantShift
+      formantShift: style.formantShift, breaths: style.breaths, humanize: style.humanize
     };
 
     const jobs = [{ name: 'Lead', notes, opts: Object.assign({}, voiceBase, { seed: 1 }), pan: 0, gain: 1 }];
@@ -257,7 +289,7 @@
         name: 'Double ' + (d + 1),
         notes: copyNotes(notes, (m) => m, 0.022, r),
         opts: Object.assign({}, voiceBase, {
-          seed: 11 + d * 7, detune: d % 2 ? 7 : -6, breathiness: clamp(style.breathiness + 0.15, 0, 1),
+          seed: 11 + d * 7, detune: d % 2 ? 7 : -6, breaths: style.breaths * 0.25, breathiness: clamp(style.breathiness + 0.15, 0, 1),
           vibDepth: style.vibDepth * 0.6, brightness: style.brightness * 0.85
         }),
         pan: d % 2 ? 0.75 : -0.75,
@@ -278,7 +310,7 @@
         name: 'Harmony ' + (hi + 1),
         notes: copyNotes(notes, f, 0.016, r),
         opts: Object.assign({}, voiceBase, {
-          seed: 41 + hi * 5, breathiness: clamp(style.breathiness + 0.12, 0, 1),
+          seed: 41 + hi * 5, breaths: style.breaths * 0.25, breathiness: clamp(style.breathiness + 0.12, 0, 1),
           vibDepth: style.vibDepth * 0.55, brightness: style.brightness * 0.9
         }),
         pan: hs.length === 1 ? 0.35 : (hi % 2 ? 0.45 : -0.45),

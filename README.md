@@ -39,6 +39,11 @@ Opening `index.html` straight from disk also works, but the microphone needs
 - **Agile**: how often she adds runs (pentatonic passing tones between notes, turns, flips, run-down endings), scoop depth and vibrato energy.
 - **Cool**: restraint. Straighter tone, later vibrato, a darker colour, laid-back timing and sighing falls at phrase ends.
 - **Layers**: diatonic harmonies (third above, triad stack, sixth below, both, octave below) in the detected or chosen key. Runs are harmonized too.
+- **Human imperfection** (in Fine tuning): the micro-behaviour that makes a voice sound like a person.
+  Spring-like pitch transitions with slight overshoot, an irregular vibrato (rate and depth drift and the
+  cycle is a little asymmetric), pitch flutter, level that pulses with the vibrato, correlated jitter and
+  shimmer, slow formant wander and per-note vowel variation, breathy onsets and releases, timing that varies
+  note to note, audible breath intakes before phrases and occasional creaky (vocal fry) endings.
 - **Fine tuning**: every underlying parameter (breath, brightness, voice size, vibrato, glide, run speed, scoop, fall, timing, mix levels, effects).
 
 *Sing it* renders all voices. *Export WAV* saves the full mix with effects.
@@ -51,10 +56,11 @@ lyrics ─▶ lyrics.js  letter-to-sound rules + dictionary ─▶ onset / vowel
 melody ─▶ score.js   notation, key detection, scales
         ─▶ arrange.js timing, legato, melisma, runs, scoops, falls, layback, doubles, harmonies
         ─▶ engine.js  per voice, 2× oversampled:
-                      Rosenberg glottal pulse + aspiration + "air" noise
+                      LF glottal source (Rd voice-quality continuum: pressed → modal → breathy,
+                      changing with loudness, pitch and phrase position) + aspiration + "air" noise
                       → 5 cascaded formant resonators (vowel targets, F1 tracks f0 on high notes)
                       → presence shelf, + parallel frication noise for consonants
-                      vibrato with delayed onset, drift, jitter/shimmer, loudness compensation
+                      loudness compensation
         ─▶ audio.js   Web Audio mix: EQ, warmth, compression, reverb, ping-pong delay, limiter, WAV export
 ```
 
